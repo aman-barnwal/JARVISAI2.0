@@ -1,104 +1,119 @@
-from flask import Flask, render_template, request
-import wikipedia, sympy as sp, urllib.parse, qrcode, os, io, yfinance as yf, language_tool_python, requests
+from flask import Flask, render_template, request, jsonify
+import wikipedia
+import sympy as sp
+import qrcode
+import io
+import base64
+import requests
 from pytube import Search
-from datetime import datetime
-from newsapi import NewsApiClient
-from flask import send_file
 
 app = Flask(__name__)
 
-# Initialize tools
-tool = language_tool_python.LanguageTool('en-US')
-newsapi = NewsApiClient(api_key='YOUR_NEWS_API_KEY')  # ← replace with your NewsAPI key
+# --- Helper Functions ---
+
+def search_youtube(query):
+    try:
+        s = Search(query)
+        results = [f"https://www.youtube.com/watch?v={v.video_id}" for v in s.results[:5]]
+        return results if results else ["No YouTube results found."]
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
+def solve_math(expression):
+    try:
+        x = sp.Symbol('x')
+        result = sp.sympify(expression)
+        return str(sp.simplify(result))
+    except Exception as e:
+        return f"Error solving math: {str(e)}"
+
+def search_books(query):
+    try:
+        url = f"https://www.googleapis.com/books/v1/volumes?q={query}"
+        data = requests.get(url).json()
+        books = []
+        for item in data.get("items", [])[:5]:
+            info = item.get("volumeInfo", {})
+            title = info.get("title", "Unknown Title")
+            link = info.get("infoLink", "#")
+            books.append(f"{title} - {link}")
+        return books if books else ["No books found."]
+    except Exception as e:
+        return [f"Error fetching books: {str(e)}"]
+
+def generate_qr(url):
+    try:
+        qr = qrcode.make(url)
+        buf = io.BytesIO()
+        qr.save(buf, format='PNG')
+        qr_str = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return qr_str
+    except Exception as e:
+        return None
+
+def fetch_stock(query):
+    try:
+        company = query.replace("stock", "").strip()
+        info = wikipedia.summary(company, sentences=2)
+        return [info]
+    except Exception:
+        return [f"No stock data found for '{query}'. Try 'Tesla stock price'."]
+
+def fetch_news(query):
+    try:
+        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey=YOUR_NEWS_API_KEY"
+        data = requests.get(url).json()
+        articles = [f"{a['title']} - {a['url']}" for a in data.get('articles', [])[:5]]
+        return articles if articles else ["No news found."]
+    except Exception as e:
+        return [f"Error fetching news: {str(e)}"]
+
+
+# --- Routes ---
 
 @app.route('/')
-def home():
+def index():
     return render_template('index.html')
 
-@app.route('/process', methods=['POST'])
-def process():
-    user_input = request.form['query'].strip()
-    query = user_input.lower()
-    
-    # --- Natural Language Command Detection ---
-    try:
-        # YouTube Search
-        if "youtube" in query or "video" in query:
-            topic = user_input.replace("give me links for", "").replace("on youtube", "").strip()
-            results = Search(topic).results
-            links = [f"https://www.youtube.com/watch?v={r.video_id}" for r in results[:5]]
-            return render_template('index.html', result="<br>".join(links))
+@app.route('/ask', methods=['POST'])
+def ask():
+    query = request.form['query'].lower().strip()
+    results = []
 
-        # Wikipedia Summary
-        elif "who is" in query or "what is" in query or "tell me about" in query:
-            topic = user_input.replace("who is", "").replace("what is", "").replace("tell me about", "").strip()
-            return render_template('index.html', result=wikipedia.summary(topic, sentences=5))
+    if query.startswith("youtube"):
+        results = search_youtube(query.replace("youtube", "").strip())
 
-        # Grammar Check
-        elif "check" in query and "grammar" in query or "check" in query:
-            text = user_input.replace("check", "").strip()
-            matches = tool.check(text)
-            corrected = language_tool_python.utils.correct(text, matches)
-            return render_template('index.html', result=f"✅ Corrected: {corrected}")
+    elif query.startswith("math") or query.startswith("integrate") or query.startswith("differentiate"):
+        expr = query.replace("math", "").replace("integrate", "").replace("differentiate", "").strip()
+        results = [solve_math(expr)]
 
-        # QR Code
-        elif "generate a qr" in query or "qr for" in query:
-            text = user_input.replace("generate a qr for", "").replace("qr for", "").strip()
-            img = qrcode.make(text)
-            buf = io.BytesIO()
-            img.save(buf, 'PNG')
-            buf.seek(0)
-            return send_file(buf, mimetype='image/png')
+    elif query.startswith("book") or query.startswith("get me books") or query.startswith("free books"):
+        results = search_books(query.replace("book", "").replace("get me books", "").strip())
 
-        # Math Integration / Differentiation
-        elif "integrate" in query or "differentiate" in query:
-            expr = query.replace("integrate", "").replace("differentiate", "").strip()
-            x = sp.symbols('x')
-            expression = sp.sympify(expr)
-            result = sp.integrate(expression, x) if "integrate" in query else sp.diff(expression, x)
-            return render_template('index.html', result=f"Result: {result}")
-
-        # Stock Data
-        elif "data for" in query or "stock" in query:
-            stock_name = user_input.replace("data for", "").replace("stock", "").strip()
-            stock = yf.Ticker(stock_name)
-            data = stock.history(period="5d")
-            return render_template('index.html', result=data.tail(5).to_html())
-
-        # Train Number
-        elif "train number" in query:
-            num = ''.join(filter(str.isdigit, query))
-            return render_template('index.html', result=f"🚆 Train {num}: Feature coming soon!")
-
-        # Flight Number
-        elif "flight number" in query:
-            num = ''.join(filter(str.isdigit, query))
-            return render_template('index.html', result=f"✈️ Flight {num}: Feature coming soon!")
-
-        # News
-        elif "news" in query or "update news" in query:
-            country = "in" if "india" in query else "us"
-            top_headlines = newsapi.get_top_headlines(country=country)
-            headlines = [article['title'] for article in top_headlines['articles'][:5]]
-            return render_template('index.html', result="<br>".join(headlines))
-
-        # Task Suggestions
-        elif "recommend me tasks" in query or "tasks for today" in query:
-            tasks = [
-                "🧠 Study one new C programming concept",
-                "💻 Push one GitHub commit",
-                "📚 Read 10 pages of a finance book",
-                "🧘 Meditate for 10 minutes",
-                "🚀 Work 30 minutes on Legend Pyramids idea"
-            ]
-            return render_template('index.html', result="<br>".join(tasks))
-
+    elif query.startswith("generate qr for"):
+        url = query.replace("generate qr for", "").strip()
+        qr_img = generate_qr(url)
+        if qr_img:
+            results = [f"<img src='data:image/png;base64,{qr_img}' alt='QR Code' width='200'>"]
         else:
-            return render_template('index.html', result="❌ Sorry, I didn’t understand that command yet.")
-    
-    except Exception as e:
-        return render_template('index.html', result=f"⚠️ Error: {e}")
+            results = ["Failed to generate QR code."]
 
-if __name__ == "__main__":
+    elif query.startswith("stock"):
+        results = fetch_stock(query)
+
+    elif query.startswith("news") or query.startswith("update news") or query.startswith("latest news"):
+        results = fetch_news(query.replace("news", "").strip())
+
+    else:
+        try:
+            summary = wikipedia.summary(query, sentences=3)
+            results = [summary]
+        except Exception:
+            results = ["No relevant information found. Try rephrasing your query."]
+
+    return jsonify(results)
+
+
+if __name__ == '__main__':
     app.run(debug=True)
 
